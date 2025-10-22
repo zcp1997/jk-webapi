@@ -5,20 +5,21 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import {
-  CloudUpload,
-  Copy,
-  FileDown,
-  FileUp,
+  AlertCircle,
+  Braces,
+  Eye,
   FolderPlus,
   History as HistoryIcon,
   Loader2,
   MoreHorizontal,
   Plus,
   RefreshCw,
-  RotateCw,
   Save,
   Send,
-  Trash2
+  SlidersHorizontal,
+  Terminal,
+  Trash2,
+  Check
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -54,17 +55,8 @@ import {
   DialogTitle
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
-import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Badge } from "@/components/ui/badge";
-import {
-  Table,
-  TableBody,
-  TableCaption,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow
-} from "@/components/ui/table";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { toast } from "@/components/ui/use-toast";
 
 import { copyToClipboard } from "@/lib/clipboard";
@@ -72,12 +64,11 @@ import { decodeBase64ToUtf8, encodeUtf8ToBase64, isValidJson } from "@/lib/base6
 import { executeMultipartRequest } from "@/lib/request";
 import {
   clearHistory,
+  cloneGroup,
   clonePreset,
   createGroup,
   deleteGroup,
   deletePreset,
-  exportAll,
-  importAll,
   loadGroups,
   loadHistory,
   pushHistory,
@@ -99,11 +90,20 @@ import { cn, generateId, isBrowser, safeJsonParse } from "@/lib/utils";
 
 const formSchema = z.object({
   url: z.string().url("请输入合法的 URL"),
-  appkey: z.string().min(1, "appkey 必填"),
+  appkey: z.string().min(1, "AppKey 必填"),
   password: z.string().min(1, "AppPassword 必填"),
   ver: z.string().min(1, "版本号必填"),
   timestamp: z.string().regex(/^\d{14}$/, "timestamp 必须是 yyyyMMddHHmmss"),
-  dataRaw: z.string().min(1, "请填写 data 原始 JSON"),
+  dataRaw: z
+    .string()
+    .min(1, "请填写 data 原始 JSON")
+    .superRefine((value, ctx) => {
+      try {
+        JSON.parse(value);
+      } catch {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "JSON 结构无效" });
+      }
+    }),
   dataB64: z.string().optional(),
   timeoutMs: z.coerce.number().min(1000, "最小 1s").max(600000, "最大 10 分钟")
 });
@@ -136,15 +136,6 @@ interface ResultView {
 
 const DEFAULT_TIMEOUT = 30000;
 
-const initialRequest: PresetRequest = {
-  url: "",
-  appkey: "",
-  password: "",
-  ver: "1",
-  dataRaw: "",
-  timestamp: getTimestamp()
-};
-
 export default function HomePage() {
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
@@ -166,19 +157,58 @@ export default function HomePage() {
   const [selectedGroupId, setSelectedGroupId] = useState<string | undefined>();
   const [selectedPresetId, setSelectedPresetId] = useState<string | undefined>();
   const [dialogState, setDialogState] = useState<DialogState>(null);
-  const [importDialogOpen, setImportDialogOpen] = useState(false);
-  const [importText, setImportText] = useState("");
-  const [confirmImport, setConfirmImport] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [sign, setSign] = useState("");
   const [result, setResult] = useState<ResultView | null>(null);
   const [lastExecution, setLastExecution] = useState<LastExecution | null>(null);
-  const [activeTab, setActiveTab] = useState("raw");
+  const [activeTab, setActiveTab] = useState("json");
+  const [isDerivedInfoOpen, setIsDerivedInfoOpen] = useState(false);
+  const [isAdvancedOpen, setIsAdvancedOpen] = useState(false);
+  const [isCurlOpen, setIsCurlOpen] = useState(false);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
 
   const watchTimestamp = form.watch("timestamp");
   const watchPassword = form.watch("password");
   const watchDataB64 = form.watch("dataB64");
   const watchDataRaw = form.watch("dataRaw");
+  const watchUrl = form.watch("url");
+  const watchAppkey = form.watch("appkey");
+  const watchVer = form.watch("ver");
+
+  const jsonStatus = useMemo(() => {
+    const raw = watchDataRaw ?? "";
+    if (!raw.trim()) {
+      return { valid: false, message: "JSON 内容为空" } as const;
+    }
+    try {
+      JSON.parse(raw);
+      return { valid: true } as const;
+    } catch (error) {
+      return { valid: false, message: (error as Error).message } as const;
+    }
+  }, [watchDataRaw]);
+
+  const fillFromPreset = useCallback(
+    (preset: PresetItem) => {
+      form.reset({
+        url: preset.request.url,
+        appkey: preset.request.appkey,
+        password: preset.request.password,
+        ver: preset.request.ver ?? "1",
+        timestamp: preset.request.timestamp ?? getTimestamp(),
+        dataRaw: preset.request.dataRaw,
+        dataB64: preset.request.dataB64 ?? "",
+        timeoutMs: form.getValues("timeoutMs") || DEFAULT_TIMEOUT
+      });
+      setResult(null);
+      setActiveTab("json");
+      toast({
+        title: "已载入请求",
+        description: `${preset.name}`
+      });
+    },
+    [form]
+  );
 
   useEffect(() => {
     if (!isBrowser()) return;
@@ -225,7 +255,7 @@ export default function HomePage() {
         fillFromPreset(preset);
       }
     }
-  }, [selectedGroupId, selectedPresetId, groupsState]);
+  }, [selectedGroupId, selectedPresetId, groupsState, fillFromPreset]);
 
   useEffect(() => {
     saveGroups(groupsState);
@@ -235,37 +265,21 @@ export default function HomePage() {
     saveHistory(historyState);
   }, [historyState]);
 
-  const fillFromPreset = useCallback(
-    (preset: PresetItem) => {
-      form.reset({
-        url: preset.request.url,
-        appkey: preset.request.appkey,
-        password: preset.request.password,
-        ver: preset.request.ver ?? "1",
-        timestamp: preset.request.timestamp ?? getTimestamp(),
-        dataRaw: preset.request.dataRaw,
-        dataB64: preset.request.dataB64 ?? "",
-        timeoutMs: form.getValues("timeoutMs") || DEFAULT_TIMEOUT
-      });
-      setResult(null);
-      setActiveTab("raw");
-      toast({
-        title: "已载入预设",
-        description: `${preset.name}`
-      });
-    },
-    [form]
-  );
-
-  const selectedGroup = useMemo(
-    () => groupsState.groups.find((group) => group.id === selectedGroupId),
-    [groupsState, selectedGroupId]
-  );
-
-  const selectedPreset = useMemo(() => {
-    if (!selectedGroup) return undefined;
-    return selectedGroup.presets.find((preset) => preset.id === selectedPresetId);
-  }, [selectedGroup, selectedPresetId]);
+  const curlPreview = useMemo(() => {
+    if (!watchUrl || !watchAppkey || !watchPassword || !watchDataB64 || !watchTimestamp || !sign) {
+      return "";
+    }
+    const sanitizedUrl = watchUrl.trim();
+    if (!sanitizedUrl) return "";
+    const fields = [
+      `-F "appkey=${watchAppkey}"`,
+      `-F "timestamp=${watchTimestamp}"`,
+      `-F "data=${watchDataB64}"`,
+      `-F "sign=${sign}"`,
+      `-F "ver=${watchVer || "1"}"`
+    ];
+    return [`curl -X POST '${sanitizedUrl}' \\`, ...fields.map((line) => `  ${line}`)].join("\n");
+  }, [watchUrl, watchAppkey, watchPassword, watchDataB64, watchTimestamp, watchVer, sign]);
 
   const createGroupAndSelect = useCallback(
     (name: string) => {
@@ -278,6 +292,25 @@ export default function HomePage() {
       if (newGroupId) {
         setSelectedGroupId(newGroupId);
         setSelectedPresetId(undefined);
+      }
+      return newGroupId;
+    },
+    []
+  );
+
+  const duplicateGroupAndSelect = useCallback(
+    (groupId: string) => {
+      let newGroupId = "";
+      let newPresetId: string | undefined;
+      setGroupsState((prev) => {
+        const next = cloneGroup(groupId, prev);
+        newGroupId = next.lastUsedGroupId ?? "";
+        newPresetId = next.lastUsedPresetId;
+        return next;
+      });
+      if (newGroupId) {
+        setSelectedGroupId(newGroupId);
+        setSelectedPresetId(newPresetId);
       }
       return newGroupId;
     },
@@ -315,13 +348,38 @@ export default function HomePage() {
     [form]
   );
 
-  const ensureTimestamp = useCallback(() => {
+  const handleFormatJson = useCallback(() => {
+    const raw = form.getValues("dataRaw");
+    if (!raw) {
+      toast({
+        title: "请填写 JSON 文本",
+        variant: "destructive"
+      });
+      return;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      const pretty = JSON.stringify(parsed, null, 2);
+      form.setValue("dataRaw", pretty, { shouldDirty: true, shouldTouch: true });
+      const encoded = encodeUtf8ToBase64(pretty);
+      form.setValue("dataB64", encoded, { shouldDirty: true, shouldTouch: true });
+      toast({
+        title: "JSON 已格式化",
+        description: `长度 ${pretty.length}`
+      });
+    } catch (error) {
+      toast({
+        title: "格式化失败",
+        description: (error as Error).message,
+        variant: "destructive"
+      });
+    }
+  }, [form]);
+
+  const refreshTimestamp = useCallback(() => {
     const now = getTimestamp();
     form.setValue("timestamp", now, { shouldDirty: true, shouldTouch: true });
-    toast({
-      title: "已刷新 timestamp",
-      description: now
-    });
+    return now;
   }, [form]);
 
   const ensureRequiredBeforeSend = useCallback(() => {
@@ -338,7 +396,7 @@ export default function HomePage() {
     if (!values.dataB64) {
       toast({
         title: "Base64 数据为空",
-        description: "请先点击「转为 Base64」",
+        description: "请检查 JSON 内容是否正确",
         variant: "destructive"
       });
       return false;
@@ -353,6 +411,7 @@ export default function HomePage() {
         if (!ok) return;
       }
       if (!ensureRequiredBeforeSend()) return;
+      const currentTimestamp = refreshTimestamp();
       setIsSending(true);
       const values = form.getValues();
       try {
@@ -364,7 +423,7 @@ export default function HomePage() {
             ver: values.ver,
             dataRaw: values.dataRaw,
             dataB64: values.dataB64 ?? "",
-            timestamp: values.timestamp
+            timestamp: currentTimestamp
           },
           timeoutMs: values.timeoutMs
         });
@@ -394,7 +453,7 @@ export default function HomePage() {
           jsonError
         };
         setResult(view);
-        setActiveTab("raw");
+        setActiveTab(view.json || view.jsonError ? "json" : "raw");
         const snapshot: PresetRequest = {
           url: values.url,
           appkey: values.appkey,
@@ -475,7 +534,7 @@ export default function HomePage() {
         setIsSending(false);
       }
     },
-    [ensureRequiredBeforeSend, form, handleConvertBase64, sign]
+    [ensureRequiredBeforeSend, form, handleConvertBase64, refreshTimestamp, sign]
   );
 
   const handleSavePreset = useCallback(
@@ -499,59 +558,12 @@ export default function HomePage() {
       setSelectedGroupId(groupId);
       setSelectedPresetId(preset.id);
       toast({
-        title: "预设已保存",
+        title: "请求已保存",
         description: `${name}`
       });
     },
     [form]
   );
-
-  const handleExport = useCallback(() => {
-    const data = exportAll(groupsState, historyState);
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `jk-webapi-helper-backup-${getTimestamp()}.json`;
-    anchor.click();
-    URL.revokeObjectURL(url);
-    toast({
-      title: "数据已导出",
-      description: "已下载备份 JSON 文件"
-    });
-  }, [groupsState, historyState]);
-
-  const handleImport = useCallback(() => {
-    try {
-      const parsed = JSON.parse(importText);
-      const result = importAll(parsed);
-      if (!result) {
-        toast({
-          title: "导入失败",
-          description: "JSON 结构不正确",
-          variant: "destructive"
-        });
-        return;
-      }
-      setGroupsState(result.groups);
-      setHistoryState(result.history);
-      setSelectedGroupId(result.groups.lastUsedGroupId ?? result.groups.groups[0]?.id);
-      setSelectedPresetId(result.groups.lastUsedPresetId);
-      setImportDialogOpen(false);
-      setImportText("");
-      setConfirmImport(false);
-      toast({
-        title: "导入成功",
-        description: "本地数据已更新"
-      });
-    } catch (error) {
-      toast({
-        title: "导入失败",
-        description: (error as Error).message,
-        variant: "destructive"
-      });
-    }
-  }, [importText]);
 
   const resetForm = useCallback(() => {
     form.reset({
@@ -566,7 +578,7 @@ export default function HomePage() {
     });
     setResult(null);
     setLastExecution(null);
-    setActiveTab("raw");
+    setActiveTab("json");
   }, [form]);
 
   const handleClearHistory = useCallback(() => {
@@ -607,16 +619,16 @@ export default function HomePage() {
   const renderGroups = () => (
     <div className="flex h-full flex-col">
       <div className="mb-2 flex items-center justify-between">
-        <div className="text-sm font-semibold">工作目录</div>
+        <div className="text-sm font-semibold">请求集合</div>
         <Button size="sm" variant="ghost" onClick={() => setDialogState({ type: "group-create" })}>
           <FolderPlus className="mr-2 h-4 w-4" />
-          新增
+          新增集合
         </Button>
       </div>
       <ScrollArea className="flex-1 rounded-md border bg-card">
-        <div className="p-2 space-y-1">
+        <div className="space-y-1 p-2">
           {groupsState.groups.length === 0 ? (
-            <div className="p-4 text-sm text-muted-foreground">暂无分组，点击新增创建。</div>
+            <div className="p-4 text-sm text-muted-foreground">暂无集合，点击「新增集合」创建。</div>
           ) : (
             groupsState.groups.map((group) => (
               <div
@@ -626,14 +638,14 @@ export default function HomePage() {
                   selectedGroupId === group.id ? "border-primary ring-1 ring-primary" : "border-border"
                 )}
               >
-                <div className="mb-2 flex items-center justify-between">
+                <div className="mb-2 flex items-center justify-between gap-2">
                   <button
                     type="button"
                     onClick={() => {
                       setSelectedGroupId(group.id);
                       setSelectedPresetId(undefined);
                     }}
-                    className="w-full text-left font-medium hover:text-primary"
+                    className="flex-1 text-left font-medium hover:text-primary"
                   >
                     {group.name}
                   </button>
@@ -644,7 +656,25 @@ export default function HomePage() {
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end">
-                      <DropdownMenuLabel>分组操作</DropdownMenuLabel>
+                      <DropdownMenuLabel>集合操作</DropdownMenuLabel>
+                      <DropdownMenuItem
+                        onClick={() => {
+                          setSelectedGroupId(group.id);
+                          setDialogState({ type: "preset-save" });
+                        }}
+                      >
+                        添加请求
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onClick={() => {
+                          const createdId = duplicateGroupAndSelect(group.id);
+                          if (createdId) {
+                            toast({ title: "集合已复制" });
+                          }
+                        }}
+                      >
+                        复制集合
+                      </DropdownMenuItem>
                       <DropdownMenuItem onClick={() => setDialogState({ type: "group-rename", group })}>
                         重命名
                       </DropdownMenuItem>
@@ -653,11 +683,11 @@ export default function HomePage() {
                         className="text-destructive focus:text-destructive"
                         onClick={() => {
                           setGroupsState((prev) => deleteGroup(group.id, prev));
-                          toast({ title: "分组已删除" });
+                          toast({ title: "集合已删除" });
                         }}
                       >
                         <Trash2 className="mr-2 h-4 w-4" />
-                        删除分组
+                        删除集合
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
@@ -689,14 +719,14 @@ export default function HomePage() {
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
-                          <DropdownMenuLabel>预设操作</DropdownMenuLabel>
+                          <DropdownMenuLabel>请求操作</DropdownMenuLabel>
                           <DropdownMenuItem
                             onClick={() => {
                               setGroupsState((prev) => clonePreset(group.id, preset, prev));
-                              toast({ title: "预设已复制" });
+                              toast({ title: "请求已复制" });
                             }}
                           >
-                            复制
+                            复制请求
                           </DropdownMenuItem>
                           <DropdownMenuItem
                             onClick={() =>
@@ -710,11 +740,11 @@ export default function HomePage() {
                             className="text-destructive focus:text-destructive"
                             onClick={() => {
                               setGroupsState((prev) => deletePreset(group.id, preset.id, prev));
-                              toast({ title: "预设已删除" });
+                              toast({ title: "请求已删除" });
                             }}
                           >
                             <Trash2 className="mr-2 h-4 w-4" />
-                            删除
+                            删除请求
                           </DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
@@ -730,7 +760,7 @@ export default function HomePage() {
                     }}
                   >
                     <Plus className="mr-2 h-4 w-4" />
-                    新建预设
+                    添加请求
                   </Button>
                 </div>
               </div>
@@ -746,7 +776,7 @@ export default function HomePage() {
       <div className="flex items-center gap-2">
         <Button onClick={() => setDialogState({ type: "preset-save" })}>
           <Save className="mr-2 h-4 w-4" />
-          保存为预设
+          保存到集合
         </Button>
         <Button variant="secondary" onClick={resetForm}>
           <RefreshCw className="mr-2 h-4 w-4" />
@@ -754,226 +784,158 @@ export default function HomePage() {
         </Button>
       </div>
       <div className="flex items-center gap-2">
-        <Button variant="outline" onClick={handleExport}>
-          <FileDown className="mr-2 h-4 w-4" />
-          导出数据
+        <Button
+          type="button"
+          onClick={() => handleSend(true)}
+          disabled={isSending}
+        >
+          {isSending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Send className="mr-2 h-4 w-4" />}
+          转为 Base64 并推送
         </Button>
-        <Button variant="outline" onClick={() => setImportDialogOpen(true)}>
-          <FileUp className="mr-2 h-4 w-4" />
-          导入数据
+        <Button variant="outline" size="sm" onClick={() => setIsDerivedInfoOpen(true)}>
+          <Eye className="mr-2 h-4 w-4" />
+          查看派生参数
+        </Button>
+        <Button variant="outline" size="sm" onClick={() => setIsAdvancedOpen(true)}>
+          <SlidersHorizontal className="mr-2 h-4 w-4" />
+          高级设置
+        </Button>
+        <Button variant="outline" size="sm" onClick={() => setIsCurlOpen(true)}>
+          <Terminal className="mr-2 h-4 w-4" />
+          请求预览
+        </Button>
+        <Button variant="outline" size="sm" onClick={() => setIsHistoryOpen(true)}>
+          <HistoryIcon className="mr-2 h-4 w-4" />
+          查看历史
         </Button>
       </div>
     </div>
   );
 
   const renderForm = () => (
-    <Card>
+    <Card className="flex min-h-0 flex-1 flex-col">
       <CardHeader>
         <CardTitle>请求构造</CardTitle>
-        <CardDescription>填写请求信息，支持 Base64 签名自动计算。</CardDescription>
+        <CardDescription>填写请求信息，timestamp 将自动生成并随请求发送。</CardDescription>
       </CardHeader>
-      <CardContent>
-        <Form {...form}>
-          <form className="space-y-6">
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              <FormField
-                control={form.control}
-                name="url"
-                render={({ field }) => (
-                  <FormItem className="md:col-span-2">
-                    <FormLabel>后端地址</FormLabel>
-                    <FormControl>
-                      <Input placeholder="https://api.example.com/endpoint" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+      <CardContent className="flex-1 overflow-hidden">
+        <div className="flex h-full flex-col gap-6 overflow-y-auto pr-1">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <FormField
+              control={form.control}
+              name="url"
+              render={({ field }) => (
+                <FormItem className="md:col-span-2">
+                  <FormLabel>后端地址</FormLabel>
+                  <FormControl>
+                    <Input placeholder="https://api.example.com/endpoint" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
 
-              <FormField
-                control={form.control}
-                name="appkey"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>appkey</FormLabel>
-                    <FormControl>
-                      <Input placeholder="appkey" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+            <FormField
+              control={form.control}
+              name="appkey"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>AppKey</FormLabel>
+                  <FormControl>
+                    <Input placeholder="appkey" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
 
-              <FormField
-                control={form.control}
-                name="password"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>password (AppPassword)</FormLabel>
-                    <FormControl>
-                      <Input type="password" placeholder="AppPassword" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+            <FormField
+              control={form.control}
+              name="password"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>AppPassword</FormLabel>
+                  <FormControl>
+                    <Input type="password" placeholder="AppPassword" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
 
-              <FormField
-                control={form.control}
-                name="ver"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>ver</FormLabel>
-                    <FormControl>
-                      <Input placeholder="1" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+            <FormField
+              control={form.control}
+              name="ver"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>ver</FormLabel>
+                  <FormControl>
+                    <Input placeholder="1" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
 
-              <FormField
-                control={form.control}
-                name="timestamp"
-                render={({ field }) => (
-                  <FormItem className="relative">
-                    <FormLabel>timestamp</FormLabel>
-                    <div className="flex items-center gap-2">
-                      <FormControl>
-                        <Input readOnly {...field} />
-                      </FormControl>
-                      <Button type="button" variant="outline" size="icon" onClick={ensureTimestamp}>
-                        <RotateCw className="h-4 w-4" />
-                      </Button>
-                    </div>
-                    <FormDescription>格式 yyyyMMddHHmmss，可随时刷新。</FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </div>
-
-            <div className="grid gap-4 md:grid-cols-2">
-              <FormField
-                control={form.control}
-                name="dataRaw"
-                render={({ field }) => (
-                  <FormItem>
-                    <div className="flex items-center justify-between">
-                      <FormLabel>data（Base64 前，原始 JSON）</FormLabel>
-                      <Badge variant="secondary">长度 {field.value?.length || 0}</Badge>
-                    </div>
-                    <FormControl>
-                      <Textarea rows={8} placeholder='{"hello": "world"}' {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="dataB64"
-                render={({ field }) => (
-                  <FormItem>
-                    <div className="flex items-center justify-between">
-                      <FormLabel>data（Base64 后）</FormLabel>
-                      <div className="flex items-center gap-2">
-                        <Badge variant="secondary">长度 {field.value?.length || 0}</Badge>
-                        <Button
-                          type="button"
-                          size="icon"
-                          variant="ghost"
-                          onClick={() => copyToClipboard(field.value ?? "", "Base64 已复制")}
-                        >
-                          <Copy className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    </div>
-                    <FormControl>
-                      <Textarea rows={8} readOnly value={field.value ?? ""} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label className="flex items-center gap-2">
-                签名 sign
-                <Badge variant="outline">MD5(timestamp + data + AppPassword)</Badge>
-              </Label>
-              <div className="flex items-center gap-2">
-                <Input readOnly value={sign} />
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon"
-                  onClick={() => copyToClipboard(sign, "sign 已复制")}
-                >
-                  <Copy className="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
-
-            <Accordion type="single" collapsible className="w-full">
-              <AccordionItem value="advanced">
-                <AccordionTrigger>高级设置</AccordionTrigger>
-                <AccordionContent>
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <FormField
-                      control={form.control}
-                      name="timeoutMs"
-                      render={({ field }) => (
-                        <FormItem>
-                          <FormLabel>超时时间 (ms)</FormLabel>
-                          <FormControl>
-                            <Input type="number" min={1000} step={1000} {...field} />
-                          </FormControl>
-                          <FormDescription>默认 30000 ms，可根据接口延迟调整。</FormDescription>
-                          <FormMessage />
-                        </FormItem>
-                      )}
-                    />
+          <FormField
+            control={form.control}
+            name="dataRaw"
+            render={({ field }) => (
+              <FormItem>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <FormLabel>data（原始 JSON）</FormLabel>
+                    {jsonStatus.valid ? (
+                      <Badge variant="outline" className="flex items-center gap-1">
+                        <Check className="h-3 w-3" />
+                        JSON 合法
+                      </Badge>
+                    ) : (
+                      <Badge variant="secondary" className="flex items-center gap-1">
+                        <AlertCircle className="h-3 w-3" />
+                        JSON 待修复
+                      </Badge>
+                    )}
                   </div>
-                </AccordionContent>
-              </AccordionItem>
-            </Accordion>
-          </form>
-        </Form>
-      </CardContent>
-    </Card>
-  );
-
-  const renderActions = () => (
-    <Card>
-      <CardHeader>
-        <CardTitle>请求操作</CardTitle>
-      </CardHeader>
-      <CardContent className="flex flex-wrap items-center gap-3">
-        <Button type="button" variant="secondary" onClick={() => handleConvertBase64(false)}>
-          <CloudUpload className="mr-2 h-4 w-4" />
-          转为 Base64
-        </Button>
-        <Button
-          type="button"
-          variant="outline"
-          onClick={() => handleSend(false)}
-          disabled={isSending}
-        >
-          {isSending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Send className="mr-2 h-4 w-4" />}
-          推送
-        </Button>
-        <Button type="button" onClick={() => handleSend(true)} disabled={isSending}>
-          {isSending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Send className="mr-2 h-4 w-4" />}
-          转为 Base64 并推送
-        </Button>
+                  <div className="flex items-center gap-2">
+                    <Badge variant="secondary">长度 {field.value?.length || 0}</Badge>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={handleFormatJson}
+                      disabled={!jsonStatus.valid}
+                    >
+                      <Braces className="mr-1 h-4 w-4" />
+                      格式化
+                    </Button>
+                  </div>
+                </div>
+                <FormControl>
+                  <Textarea
+                    className="min-h-[240px]"
+                    placeholder='{"hello": "world"}'
+                    {...field}
+                  />
+                </FormControl>
+                <FormDescription>
+                  支持中文字段名，发送前会自动转换为 Base64 并参与签名。
+                </FormDescription>
+                {!jsonStatus.valid && field.value ? (
+                  <p className="text-xs text-destructive">{jsonStatus.message}</p>
+                ) : null}
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        </div>
       </CardContent>
     </Card>
   );
 
   const renderResult = () => (
-    <Card className="h-full">
+    <Card className="flex min-h-0 flex-1 flex-col">
       <CardHeader>
         <CardTitle>响应结果</CardTitle>
         {lastExecution ? (
@@ -1005,31 +967,12 @@ export default function HomePage() {
           <CardDescription>等待请求完成后显示结果。</CardDescription>
         )}
       </CardHeader>
-      <CardContent className="flex h-[420px] flex-col">
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="flex h-full flex-col">
+      <CardContent className="flex min-h-0 flex-1 flex-col">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="flex min-h-0 flex-1 flex-col">
           <TabsList className="w-full">
-            <TabsTrigger value="raw">Raw</TabsTrigger>
-            <TabsTrigger value="decoded">Base64 解码</TabsTrigger>
             <TabsTrigger value="json">JSON 视图</TabsTrigger>
-            <TabsTrigger value="history">
-              <HistoryIcon className="mr-2 h-4 w-4" />
-              历史
-            </TabsTrigger>
+            <TabsTrigger value="raw">Raw</TabsTrigger>
           </TabsList>
-          <TabsContent value="raw" className="flex-1 overflow-hidden rounded-md border bg-muted/20">
-            <ScrollArea className="h-full">
-              <pre className="whitespace-pre-wrap p-4 text-sm">
-                {result?.raw ?? "暂无数据"}
-              </pre>
-            </ScrollArea>
-          </TabsContent>
-          <TabsContent value="decoded" className="flex-1 overflow-hidden rounded-md border bg-muted/20">
-            <ScrollArea className="h-full">
-              <pre className="whitespace-pre-wrap p-4 text-sm">
-                {result?.decoded ?? result?.base64Error ?? "暂无数据"}
-              </pre>
-            </ScrollArea>
-          </TabsContent>
           <TabsContent value="json" className="flex-1 overflow-hidden rounded-md border bg-muted/20">
             <ScrollArea className="h-full">
               <pre className="whitespace-pre-wrap p-4 text-sm">
@@ -1037,71 +980,12 @@ export default function HomePage() {
               </pre>
             </ScrollArea>
           </TabsContent>
-          <TabsContent value="history" className="flex-1 overflow-hidden rounded-md border bg-muted/20 p-0">
-            <div className="flex h-full flex-col">
-              <div className="flex items-center justify-between border-b px-4 py-2">
-                <div className="text-sm text-muted-foreground">
-                  共 {historyState.items.length} 条记录（保留 {historyState.limit ?? 500} 条）
-                </div>
-                <Button size="sm" variant="ghost" onClick={handleClearHistory}>
-                  清空历史
-                </Button>
-              </div>
-              <ScrollArea className="flex-1">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>时间</TableHead>
-                      <TableHead>状态</TableHead>
-                      <TableHead>耗时</TableHead>
-                      <TableHead>appkey</TableHead>
-                      <TableHead>数据长度</TableHead>
-                      <TableHead className="text-right">操作</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {historyState.items.length === 0 ? (
-                      <TableRow>
-                        <TableCell colSpan={6} className="text-center text-muted-foreground">
-                          暂无历史记录
-                        </TableCell>
-                      </TableRow>
-                    ) : (
-                      historyState.items.map((item) => (
-                        <TableRow key={item.id}>
-                          <TableCell>{formatIso(item.ts)}</TableCell>
-                          <TableCell>
-                            <Badge variant={item.ok ? "secondary" : "outline"}>
-                              {item.status ?? "错误"}
-                            </Badge>
-                          </TableCell>
-                          <TableCell>{item.durationMs} ms</TableCell>
-                          <TableCell>{item.requestSummary.appkey}</TableCell>
-                          <TableCell>{item.requestSummary.dataB64Len}</TableCell>
-                          <TableCell className="text-right space-x-2">
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() => copyToClipboard(item.responseText, "响应已复制")}
-                            >
-                              复制响应
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() => handleHistoryRestore(item)}
-                            >
-                              回填
-                            </Button>
-                          </TableCell>
-                        </TableRow>
-                      ))
-                    )}
-                  </TableBody>
-                  <TableCaption>请求历史会自动保留最近 500 条。</TableCaption>
-                </Table>
-              </ScrollArea>
-            </div>
+          <TabsContent value="raw" className="flex-1 overflow-hidden rounded-md border bg-muted/20">
+            <ScrollArea className="h-full">
+              <pre className="whitespace-pre-wrap p-4 text-sm">
+                {result?.raw ?? "暂无数据"}
+              </pre>
+            </ScrollArea>
           </TabsContent>
         </Tabs>
       </CardContent>
@@ -1109,148 +993,290 @@ export default function HomePage() {
   );
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden">
-      <header className="border-b bg-background">
-        <div className="container mx-auto flex h-16 items-center justify-between px-4">
-          <div>
-            <div className="text-lg font-semibold">jk-webapi-helper</div>
-            <div className="text-xs text-muted-foreground">
-              构造 multipart/form-data 请求，调试 jk webapi。
+    <Form {...form}>
+      <div className="flex h-screen flex-col overflow-hidden">
+        <header className="border-b bg-background">
+          <div className="mx-auto flex h-16 w-full max-w-[1280px] items-center justify-between px-4">
+            <div>
+              <div className="text-lg font-semibold">jk-webapi-helper</div>
+              <div className="text-xs text-muted-foreground">
+                构造 multipart/form-data 请求，调试 jk webapi。
+              </div>
+            </div>
+            <div className="flex items-center gap-3 text-xs text-muted-foreground">
+              <div>Base64 长度 {form.getValues("dataB64")?.length ?? 0}</div>
+              <Separator orientation="vertical" className="h-4" />
+              <div>JSON 长度 {watchDataRaw?.length ?? 0}</div>
             </div>
           </div>
-          <div className="flex items-center gap-3 text-xs text-muted-foreground">
-            <div>Base64 长度 {form.getValues("dataB64")?.length ?? 0}</div>
-            <Separator orientation="vertical" className="h-4" />
-            <div>JSON 长度 {watchDataRaw?.length ?? 0}</div>
-          </div>
-        </div>
-      </header>
-      <main className="flex flex-1 overflow-hidden">
-        <aside className="hidden w-72 border-r bg-muted/20 p-4 md:block">{renderGroups()}</aside>
-        <section className="flex-1 overflow-y-auto">
-          <div className="container mx-auto flex flex-col gap-4 px-4 py-6">
-            {renderToolbar()}
-            {renderForm()}
-            {renderActions()}
-            {renderResult()}
-          </div>
-        </section>
-      </main>
+        </header>
+        <main className="flex flex-1 overflow-hidden">
+          <aside className="hidden w-72 border-r bg-muted/20 p-4 lg:block">{renderGroups()}</aside>
+          <section className="flex-1 overflow-hidden">
+            <div className="mx-auto flex h-full w-full max-w-[1280px] flex-col gap-4 px-4 py-6">
+              {renderToolbar()}
+              <div className="flex min-h-0 flex-1 flex-col gap-4 lg:flex-row">
+                <div className="flex min-h-0 flex-1 flex-col gap-4">
+                  {renderForm()}
+                </div>
+                <div className="flex min-h-0 flex-col gap-4 lg:w-[480px] lg:flex-none">
+                  {renderResult()}
+                </div>
+              </div>
+            </div>
+          </section>
+        </main>
 
-      <Dialog open={dialogState?.type === "group-create"} onOpenChange={(open) => !open && setDialogState(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>新增分组</DialogTitle>
-            <DialogDescription>为分组取一个名字，用于管理多个接口预设。</DialogDescription>
-          </DialogHeader>
-          <GroupNameForm
-            onSubmit={(name) => {
-              createGroupAndSelect(name);
-              setDialogState(null);
-              toast({ title: "分组已创建", description: name });
-            }}
-          />
-        </DialogContent>
-      </Dialog>
-
-      {dialogState && dialogState.type === "group-rename" && (
-        <Dialog open onOpenChange={(open) => !open && setDialogState(null)}>
+        <Dialog open={dialogState?.type === "group-create"} onOpenChange={(open) => !open && setDialogState(null)}>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>重命名分组</DialogTitle>
+              <DialogTitle>新增集合</DialogTitle>
+              <DialogDescription>为集合取一个名字，用于管理多个请求。</DialogDescription>
             </DialogHeader>
             <GroupNameForm
-              defaultValue={dialogState.group.name}
               onSubmit={(name) => {
-                setGroupsState((prev) => renameGroup(dialogState.group.id, name, prev));
+                createGroupAndSelect(name);
                 setDialogState(null);
-                toast({ title: "分组已重命名" });
+                toast({ title: "集合已创建", description: name });
               }}
             />
           </DialogContent>
         </Dialog>
-      )}
 
-      {dialogState?.type === "preset-save" && (
-        <Dialog open onOpenChange={(open) => !open && setDialogState(null)}>
-          <DialogContent>
+        {dialogState && dialogState.type === "group-rename" && (
+          <Dialog open onOpenChange={(open) => !open && setDialogState(null)}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>重命名集合</DialogTitle>
+              </DialogHeader>
+              <GroupNameForm
+                defaultValue={dialogState.group.name}
+                onSubmit={(name) => {
+                  setGroupsState((prev) => renameGroup(dialogState.group.id, name, prev));
+                  setDialogState(null);
+                  toast({ title: "集合已重命名" });
+                }}
+              />
+            </DialogContent>
+          </Dialog>
+        )}
+
+        {dialogState?.type === "preset-save" && (
+          <Dialog open onOpenChange={(open) => !open && setDialogState(null)}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>保存为请求</DialogTitle>
+                <DialogDescription>选择集合并为本次参数命名。</DialogDescription>
+              </DialogHeader>
+              <PresetSaveForm
+                groups={groupsState.groups}
+                selectedGroupId={selectedGroupId}
+                onSubmit={(groupId, name) => {
+                  handleSavePreset(groupId, name);
+                  setDialogState(null);
+                }}
+                onCreateGroup={(name) => {
+                  const id = createGroupAndSelect(name);
+                  return id;
+                }}
+              />
+            </DialogContent>
+          </Dialog>
+        )}
+
+        {dialogState && dialogState.type === "preset-rename" && (
+          <Dialog open onOpenChange={(open) => !open && setDialogState(null)}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>重命名请求</DialogTitle>
+              </DialogHeader>
+              <GroupNameForm
+                defaultValue={dialogState.preset.name}
+                onSubmit={(name) => {
+                  const preset: PresetItem = {
+                    ...dialogState.preset,
+                    name,
+                    updatedAt: new Date().toISOString()
+                  };
+                  setGroupsState((prev) => upsertPreset(dialogState.groupId, preset, prev));
+                  setDialogState(null);
+                  toast({ title: "请求已重命名" });
+                }}
+              />
+            </DialogContent>
+          </Dialog>
+        )}
+
+        <Dialog open={isDerivedInfoOpen} onOpenChange={setIsDerivedInfoOpen}>
+          <DialogContent className="max-w-2xl">
             <DialogHeader>
-              <DialogTitle>保存为预设</DialogTitle>
-              <DialogDescription>选择分组并为本次参数命名。</DialogDescription>
+              <DialogTitle>派生参数</DialogTitle>
+              <DialogDescription>查看签名与 Base64 数据，便于复制或排查。</DialogDescription>
             </DialogHeader>
-            <PresetSaveForm
-              groups={groupsState.groups}
-              selectedGroupId={selectedGroupId}
-              onSubmit={(groupId, name) => {
-                handleSavePreset(groupId, name);
-                setDialogState(null);
-              }}
-              onCreateGroup={(name) => {
-                const id = createGroupAndSelect(name);
-                return id;
-              }}
-            />
+            <div className="space-y-6">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label>data（Base64 后）</Label>
+                  <div className="flex items-center gap-2">
+                    <Badge variant="secondary">长度 {watchDataB64?.length ?? 0}</Badge>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => copyToClipboard(watchDataB64 ?? "", "Base64 已复制")}
+                      disabled={!watchDataB64}
+                    >
+                      复制
+                    </Button>
+                  </div>
+                </div>
+                <ScrollArea className="max-h-48 rounded-md border bg-muted/20">
+                  <pre className="whitespace-pre-wrap break-all p-4 text-xs font-mono">
+                    {watchDataB64 || "暂无数据"}
+                  </pre>
+                </ScrollArea>
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label>签名 sign</Label>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => copyToClipboard(sign, "sign 已复制")}
+                    disabled={!sign}
+                  >
+                    复制
+                  </Button>
+                </div>
+                <Input readOnly value={sign} />
+                <FormDescription>算法：MD5(timestamp + data + AppPassword)</FormDescription>
+              </div>
+            </div>
           </DialogContent>
         </Dialog>
-      )}
 
-      {dialogState && dialogState.type === "preset-rename" && (
-        <Dialog open onOpenChange={(open) => !open && setDialogState(null)}>
-          <DialogContent>
+        <Dialog open={isAdvancedOpen} onOpenChange={setIsAdvancedOpen}>
+          <DialogContent className="max-w-md">
             <DialogHeader>
-              <DialogTitle>重命名预设</DialogTitle>
+              <DialogTitle>高级设置</DialogTitle>
+              <DialogDescription>调整请求细节以适配后端性能。</DialogDescription>
             </DialogHeader>
-            <GroupNameForm
-              defaultValue={dialogState.preset.name}
-              onSubmit={(name) => {
-                const preset: PresetItem = {
-                  ...dialogState.preset,
-                  name,
-                  updatedAt: new Date().toISOString()
-                };
-                setGroupsState((prev) => upsertPreset(dialogState.groupId, preset, prev));
-                setDialogState(null);
-                toast({ title: "预设已重命名" });
-              }}
-            />
+            <div className="space-y-4">
+              <FormField
+                control={form.control}
+                name="timeoutMs"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>超时时间 (ms)</FormLabel>
+                    <FormControl>
+                      <Input type="number" min={1000} step={1000} {...field} />
+                    </FormControl>
+                    <FormDescription>默认 30000 ms，可根据接口延迟调整。</FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </div>
           </DialogContent>
         </Dialog>
-      )}
 
-      <Dialog open={importDialogOpen} onOpenChange={setImportDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>导入数据</DialogTitle>
-            <DialogDescription>
-              粘贴导出的 JSON 文本。导入前请确认数据来源可靠，导入后当前数据将被覆盖。
-            </DialogDescription>
-          </DialogHeader>
-          <Textarea
-            rows={8}
-            value={importText}
-            onChange={(e) => setImportText(e.target.value)}
-            placeholder="粘贴 jk_webapi_helper 导出的 JSON"
-          />
-          <div className="flex items-center gap-2">
-            <input
-              id="confirm-import"
-              type="checkbox"
-              checked={confirmImport}
-              onChange={(e) => setConfirmImport(e.target.checked)}
-            />
-            <Label htmlFor="confirm-import">确认覆盖当前数据</Label>
-          </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setImportDialogOpen(false)}>
-              取消
-            </Button>
-            <Button onClick={handleImport} disabled={!confirmImport}>
-              导入
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
+        <Dialog open={isCurlOpen} onOpenChange={setIsCurlOpen}>
+          <DialogContent className="max-w-2xl">
+            <DialogHeader>
+              <DialogTitle>请求预览</DialogTitle>
+              <DialogDescription>复制 curl 命令以便在终端复现请求。</DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4">
+              <div className="flex justify-end">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => copyToClipboard(curlPreview, "cURL 已复制")}
+                  disabled={!curlPreview}
+                >
+                  复制 cURL
+                </Button>
+              </div>
+              <ScrollArea className="max-h-72 rounded-md border bg-muted/20">
+                <pre className="whitespace-pre text-xs leading-6 p-4">
+                  {curlPreview || "填写完整参数后将自动生成。"}
+                </pre>
+              </ScrollArea>
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog open={isHistoryOpen} onOpenChange={setIsHistoryOpen}>
+          <DialogContent className="max-w-4xl">
+            <DialogHeader>
+              <DialogTitle>请求历史</DialogTitle>
+              <DialogDescription>最近发送的请求会自动保留，便于复用。</DialogDescription>
+            </DialogHeader>
+            <div className="flex items-center justify-between">
+              <div className="text-sm text-muted-foreground">
+                共 {historyState.items.length} 条记录（保留 {historyState.limit ?? 500} 条）
+              </div>
+              <Button size="sm" variant="ghost" onClick={handleClearHistory}>
+                清空历史
+              </Button>
+            </div>
+            <ScrollArea className="max-h-[420px]">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>时间</TableHead>
+                    <TableHead>状态</TableHead>
+                    <TableHead>耗时</TableHead>
+                    <TableHead>appkey</TableHead>
+                    <TableHead>数据长度</TableHead>
+                    <TableHead className="text-right">操作</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {historyState.items.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={6} className="text-center text-muted-foreground">
+                        暂无历史记录
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    historyState.items.map((item) => (
+                      <TableRow key={item.id}>
+                        <TableCell>{formatIso(item.ts)}</TableCell>
+                        <TableCell>
+                          <Badge variant={item.ok ? "secondary" : "outline"}>
+                            {item.status ?? "错误"}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>{item.durationMs} ms</TableCell>
+                        <TableCell>{item.requestSummary.appkey}</TableCell>
+                        <TableCell>{item.requestSummary.dataB64Len}</TableCell>
+                        <TableCell className="text-right space-x-2">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => copyToClipboard(item.responseText, "响应已复制")}
+                          >
+                            复制响应
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => handleHistoryRestore(item)}
+                          >
+                            回填
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </ScrollArea>
+          </DialogContent>
+        </Dialog>
+      </div>
+    </Form>
   );
 }
 
@@ -1314,25 +1340,25 @@ function PresetSaveForm({
       onSubmit={(event) => {
         event.preventDefault();
         if (!groupId) {
-          toast({ title: "请选择分组", variant: "destructive" });
+          toast({ title: "请选择集合", variant: "destructive" });
           return;
         }
         if (!name.trim()) {
-          toast({ title: "预设名称不能为空", variant: "destructive" });
+          toast({ title: "请求名称不能为空", variant: "destructive" });
           return;
         }
         onSubmit(groupId, name.trim());
       }}
     >
       <div className="space-y-2">
-        <Label>选择分组</Label>
+        <Label>选择集合</Label>
         <select
           value={groupId}
           onChange={(event) => setGroupId(event.target.value)}
           className="h-10 w-full rounded-md border px-3 text-sm"
         >
           <option value="" disabled>
-            请选择分组
+            请选择集合
           </option>
           {groups.map((group) => (
             <option key={group.id} value={group.id}>
@@ -1343,7 +1369,7 @@ function PresetSaveForm({
       </div>
 
       <div className="space-y-2">
-        <Label>预设名称</Label>
+        <Label>请求名称</Label>
         <Input
           value={name}
           onChange={(event) => setName(event.target.value)}
@@ -1353,18 +1379,18 @@ function PresetSaveForm({
       </div>
 
       <div className="space-y-2 rounded-md border p-3">
-        <Label>快速新建分组</Label>
+        <Label>快速新建集合</Label>
         <div className="flex gap-2">
           <Input
             value={newGroupName}
             onChange={(event) => setNewGroupName(event.target.value)}
-            placeholder="新分组名称"
+            placeholder="新集合名称"
           />
           <Button
             type="button"
             onClick={() => {
               if (!newGroupName.trim()) {
-                toast({ title: "分组名称不能为空", variant: "destructive" });
+                toast({ title: "集合名称不能为空", variant: "destructive" });
                 return;
               }
               const createdId = onCreateGroup(newGroupName.trim());
@@ -1375,7 +1401,7 @@ function PresetSaveForm({
             }}
           >
             <Plus className="mr-2 h-4 w-4" />
-            新建
+            新建集合
           </Button>
         </div>
       </div>

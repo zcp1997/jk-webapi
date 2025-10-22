@@ -140,6 +140,35 @@ export function renameGroup(groupId: string, name: string, existing: StorageGrou
   return result;
 }
 
+export function cloneGroup(groupId: string, existing: StorageGroups): StorageGroups {
+  const source = existing.groups.find((group) => group.id === groupId);
+  if (!source) return existing;
+
+  const clonedPresets = source.presets.map((preset) => ({
+    ...preset,
+    id: generateId(),
+    name: `${preset.name}`,
+    updatedAt: new Date().toISOString()
+  }));
+
+  const newGroup: GroupItem = {
+    ...source,
+    id: generateId(),
+    name: `${source.name} Copy`,
+    presets: clonedPresets,
+    updatedAt: new Date().toISOString()
+  };
+
+  const result: StorageGroups = {
+    ...existing,
+    groups: [...existing.groups, newGroup],
+    lastUsedGroupId: newGroup.id,
+    lastUsedPresetId: clonedPresets[0]?.id
+  };
+  saveGroups(result);
+  return result;
+}
+
 export function clonePreset(groupId: string, preset: PresetItem, existing: StorageGroups): StorageGroups {
   const clone: PresetItem = {
     ...preset,
