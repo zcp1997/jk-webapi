@@ -1,0 +1,28 @@
+{
+  "productName": "jk-webapi-helper",
+  "version": "0.1.0",
+  "identifier": "com.jk.webapi.helper",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build",
+    "devUrl": "http://localhost:3000",
+    "frontendDist": ".next"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "jk-webapi-helper",
+        "width": 1200,
+        "height": 800,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg", "msi", "appimage"],
+    "publisher": "jk-webapi-helper",
+    "icon": []
+  }
+}
